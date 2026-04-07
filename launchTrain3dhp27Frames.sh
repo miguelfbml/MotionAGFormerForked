@@ -21,8 +21,6 @@ echo "Starting training job for MotionAGFormer on MPI-INF-3DHP"
 
 python3 train_3dhp.py \
     --config configs/mpi/MotionAGFormer-small_27.yaml \
-    --checkpoint checkpoint \
-    --checkpoint-file motionagformer-s-mpi.pth.tr \
     --new-checkpoint checkpoint_mpi_27 \
     --use-wandb \
     --wandb-name "MotionAGFormer_MPI_3DHP_27_frames_training"
