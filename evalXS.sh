@@ -9,4 +9,4 @@
 echo "Starting eval job for MotionAGFormer on MPI-INF-3DHP"
 
 
-python train_3dhp.py --eval-only --checkpoint checkpoint --checkpoint-file motionagformer-xs-mpi.pth.tr --config configs/MotionAGFormer_xsmall.yaml
+python train_3dhp.py --eval-only --checkpoint checkpoint --checkpoint-file motionagformer-xs-mpi.pth.tr --config configs/mpi/MotionAGFormer-xsmall.yaml
