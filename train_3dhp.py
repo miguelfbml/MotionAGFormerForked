@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 import pkg_resources
 
 import numpy as np
@@ -101,6 +102,99 @@ def input_augmentation(input_2D, model, joints_left, joints_right):
 
     return input_2D, output_3D
 
+
+def compute_torso_diameter_3dhp(gt_root_rel_mm):
+    right_shoulder = gt_root_rel_mm[:, 2, :]
+    left_shoulder = gt_root_rel_mm[:, 5, :]
+    right_hip = gt_root_rel_mm[:, 8, :]
+    left_hip = gt_root_rel_mm[:, 11, :]
+
+    shoulder_mid = (right_shoulder + left_shoulder) / 2.0
+    hip_mid = (right_hip + left_hip) / 2.0
+    return torch.norm(shoulder_mid - hip_mid, dim=-1)
+
+
+def compute_pck_metrics_3dhp(joint_errors_mm, torso_diameters_mm):
+    if joint_errors_mm.numel() == 0:
+        return {
+            'PCK@10%_torso': 0.0,
+            'PCK@20%_torso': 0.0,
+            'PCK@30%_torso': 0.0,
+            'PCK@100%_torso': 0.0,
+            'PCK@10%_150mm': 0.0,
+            'PCK@20%_150mm': 0.0,
+            'PCK@30%_150mm': 0.0,
+            'PCK@100%_150mm': 0.0,
+        }
+
+    torso_thresholds = {
+        'PCK@10%_torso': 0.10,
+        'PCK@20%_torso': 0.20,
+        'PCK@30%_torso': 0.30,
+        'PCK@100%_torso': 1.00,
+    }
+
+    fixed_thresholds = {
+        'PCK@10%_150mm': 15.0,
+        'PCK@20%_150mm': 30.0,
+        'PCK@30%_150mm': 45.0,
+        'PCK@100%_150mm': 150.0,
+    }
+
+    metrics = {}
+    for key, ratio in torso_thresholds.items():
+        threshold = torso_diameters_mm.unsqueeze(-1) * ratio
+        metrics[key] = (joint_errors_mm <= threshold).float().mean().item()
+
+    for key, threshold_mm in fixed_thresholds.items():
+        metrics[key] = (joint_errors_mm <= threshold_mm).float().mean().item()
+
+    return metrics
+
+
+def compute_auc_3dhp(joint_errors_mm, max_threshold_mm=150.0, step_mm=5.0):
+    if joint_errors_mm.numel() == 0:
+        return 0.0
+
+    thresholds = torch.arange(
+        0.0,
+        max_threshold_mm + step_mm,
+        step_mm,
+        device=joint_errors_mm.device,
+        dtype=joint_errors_mm.dtype,
+    )
+    pck_curve = torch.stack([(joint_errors_mm <= threshold).float().mean() for threshold in thresholds])
+    auc = torch.trapz(pck_curve, thresholds) / max_threshold_mm
+    return auc.item()
+
+
+def timed_model_forward(model, input_2d):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    start = time.perf_counter()
+    output = model(input_2d)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    return output, elapsed_ms
+
+
+def input_augmentation_with_timing(input_2D, model, joints_left, joints_right):
+    input_2D_flip = input_2D[:, 1]
+    input_2D_non_flip = input_2D[:, 0]
+
+    output_3D_flip, flip_time_ms = timed_model_forward(model, input_2D_flip)
+
+    output_3D_flip[..., 0] *= -1
+    output_3D_flip[:, :, joints_left + joints_right, :] = output_3D_flip[:, :, joints_right + joints_left, :]
+
+    output_3D_non_flip, non_flip_time_ms = timed_model_forward(model, input_2D_non_flip)
+
+    output_3D = (output_3D_non_flip + output_3D_flip) / 2
+    total_time_ms = flip_time_ms + non_flip_time_ms
+
+    return input_2D_non_flip, output_3D, (non_flip_time_ms, flip_time_ms, total_time_ms)
+
 def evaluate(model, test_loader, n_frames):
     model.eval()
     joints_left = [5, 6, 7, 11, 12, 13]
@@ -108,6 +202,11 @@ def evaluate(model, test_loader, n_frames):
 
     data_inference = {}
     error_sum_test = AccumLoss()
+    all_joint_errors = []
+    all_torso_diameters = []
+    inference_call_times_ms = []
+    inference_sample_times_ms = []
+    inference_frame_times_ms = []
 
     for data in tqdm(test_loader, 0):
         batch_cam, gt_3D, input_2D, seq, scale, bb_box = data
@@ -119,7 +218,12 @@ def evaluate(model, test_loader, n_frames):
         out_target[:, :, 14] = 0
         gt_3D = gt_3D.view(N, -1, 17, 3).type(torch.cuda.FloatTensor)
 
-        input_2D, output_3D = input_augmentation(input_2D, model, joints_left, joints_right)
+        input_2D, output_3D, timing_stats = input_augmentation_with_timing(input_2D, model, joints_left, joints_right)
+        non_flip_time_ms, flip_time_ms, total_time_ms = timing_stats
+        inference_call_times_ms.extend([non_flip_time_ms, flip_time_ms])
+        inference_sample_times_ms.append(total_time_ms / max(N, 1))
+        T = input_2D.shape[1]
+        inference_frame_times_ms.append(total_time_ms / max(N * T, 1))
 
         output_3D = output_3D * scale.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, output_3D.size(1), 17, 3)
         pad = (n_frames - 1) // 2
@@ -135,6 +239,10 @@ def evaluate(model, test_loader, n_frames):
         out_target = out_target - out_target[..., 14:15, :] # Root-relative prediction
 
         joint_error_test = mpjpe_cal(pred_out, out_target).item()
+        joint_errors = torch.norm(pred_out - out_target, dim=-1).squeeze(1)
+        torso_diameters = compute_torso_diameter_3dhp(out_target.squeeze(1))
+        all_joint_errors.append(joint_errors)
+        all_torso_diameters.append(torso_diameters)
 
         for seq_cnt in range(len(seq)):
             seq_name = seq[seq_cnt]
@@ -148,8 +256,44 @@ def evaluate(model, test_loader, n_frames):
 
     for seq_name in data_inference.keys():
         data_inference[seq_name] = data_inference[seq_name][:, :, None, :]
+
+    joint_errors_all = torch.cat(all_joint_errors, dim=0) if all_joint_errors else torch.empty((0, 17), device='cuda')
+    torso_diameters_all = torch.cat(all_torso_diameters, dim=0) if all_torso_diameters else torch.empty((0,), device='cuda')
+    pck_metrics = compute_pck_metrics_3dhp(joint_errors_all, torso_diameters_all)
+    auc = compute_auc_3dhp(joint_errors_all, max_threshold_mm=150.0, step_mm=5.0)
+
+    call_times = np.array(inference_call_times_ms, dtype=np.float64)
+    sample_times = np.array(inference_sample_times_ms, dtype=np.float64)
+    frame_times = np.array(inference_frame_times_ms, dtype=np.float64)
     
     print(f'Protocol #1 Error (MPJPE): {error_sum_test.avg:.2f} mm')
+    if call_times.size > 0:
+        print(
+            'Inference time / forward call (ms): '
+            f'mean={call_times.mean():.3f}, p50={np.percentile(call_times, 50):.3f}, '
+            f'p95={np.percentile(call_times, 95):.3f}'
+        )
+    if sample_times.size > 0:
+        print(
+            'Inference time / sample (ms): '
+            f'mean={sample_times.mean():.3f}, p50={np.percentile(sample_times, 50):.3f}, '
+            f'p95={np.percentile(sample_times, 95):.3f}'
+        )
+    if frame_times.size > 0:
+        print(
+            'Inference time / frame (ms): '
+            f'mean={frame_times.mean():.4f}, p50={np.percentile(frame_times, 50):.4f}, '
+            f'p95={np.percentile(frame_times, 95):.4f}'
+        )
+    print(f'PCK@10%_torso: {pck_metrics["PCK@10%_torso"] * 100:.2f}%')
+    print(f'PCK@20%_torso: {pck_metrics["PCK@20%_torso"] * 100:.2f}%')
+    print(f'PCK@30%_torso: {pck_metrics["PCK@30%_torso"] * 100:.2f}%')
+    print(f'PCK@100%_torso: {pck_metrics["PCK@100%_torso"] * 100:.2f}%')
+    print(f'PCK@10%_150mm: {pck_metrics["PCK@10%_150mm"] * 100:.2f}%')
+    print(f'PCK@20%_150mm: {pck_metrics["PCK@20%_150mm"] * 100:.2f}%')
+    print(f'PCK@30%_150mm: {pck_metrics["PCK@30%_150mm"] * 100:.2f}%')
+    print(f'PCK@100%_150mm: {pck_metrics["PCK@100%_150mm"] * 100:.2f}%')
+    print(f'AUC@0-150mm: {auc:.4f}')
 
     return error_sum_test.avg, data_inference
 
