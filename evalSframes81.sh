@@ -1,0 +1,12 @@
+#!/bin/bash
+#
+#SBATCH --partition=gpu_min8gb     # Reserved partition
+#SBATCH --qos=gpu_min8gb           # QoS level. Must match the partition name. External users must add the suffix "_ext".
+#SBATCH --job-name=testMotionAGFormerS81    # Job name
+#SBATCH --output=slurm_%x.%j.out   # File containing STDOUT output
+#SBATCH --error=slurm_%x.%j.err    # File containing STDERR output. If ommited, use STDOUT.
+
+echo "Starting eval job for MotionAGFormerS81 on MPI-INF-3DHP"
+
+
+python train_3dhp.py --eval-only --checkpoint checkpoint_mpi_81 --checkpoint-file best_epoch.pth.tr --config configs/mpi/testing/notestaug/MotionAGFormer-small_81.yaml
