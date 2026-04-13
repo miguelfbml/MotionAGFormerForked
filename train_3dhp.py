@@ -180,20 +180,31 @@ def timed_model_forward(model, input_2d):
 
 
 def input_augmentation_with_timing(input_2D, model, joints_left, joints_right):
-    input_2D_flip = input_2D[:, 1]
-    input_2D_non_flip = input_2D[:, 0]
+    # With test-time augmentation enabled, shape is (N, 2, T, J, C).
+    # Without it, shape is (N, T, J, C) and we run a single forward pass.
+    if input_2D.dim() == 5:
+        input_2D_flip = input_2D[:, 1]
+        input_2D_non_flip = input_2D[:, 0]
 
-    output_3D_flip, flip_time_ms = timed_model_forward(model, input_2D_flip)
+        output_3D_flip, flip_time_ms = timed_model_forward(model, input_2D_flip)
 
-    output_3D_flip[..., 0] *= -1
-    output_3D_flip[:, :, joints_left + joints_right, :] = output_3D_flip[:, :, joints_right + joints_left, :]
+        output_3D_flip[..., 0] *= -1
+        output_3D_flip[:, :, joints_left + joints_right, :] = output_3D_flip[:, :, joints_right + joints_left, :]
 
-    output_3D_non_flip, non_flip_time_ms = timed_model_forward(model, input_2D_non_flip)
+        output_3D_non_flip, non_flip_time_ms = timed_model_forward(model, input_2D_non_flip)
 
-    output_3D = (output_3D_non_flip + output_3D_flip) / 2
-    total_time_ms = flip_time_ms + non_flip_time_ms
+        output_3D = (output_3D_non_flip + output_3D_flip) / 2
+        total_time_ms = flip_time_ms + non_flip_time_ms
 
-    return input_2D_non_flip, output_3D, (non_flip_time_ms, flip_time_ms, total_time_ms)
+        return input_2D_non_flip, output_3D, (non_flip_time_ms, flip_time_ms, total_time_ms)
+
+    if input_2D.dim() == 4:
+        output_3D, non_flip_time_ms = timed_model_forward(model, input_2D)
+        flip_time_ms = 0.0
+        total_time_ms = non_flip_time_ms
+        return input_2D, output_3D, (non_flip_time_ms, flip_time_ms, total_time_ms)
+
+    raise ValueError(f'Unexpected input_2D shape in evaluation: {tuple(input_2D.shape)}')
 
 def evaluate(model, test_loader, n_frames):
     model.eval()
