@@ -284,6 +284,7 @@ def evaluate(model, test_loader, n_frames):
     sample_fps_p95 = (1000.0 / sample_p95_ms) if sample_p95_ms > 0 else 0.0
     frame_mean_ms = frame_times.mean() if frame_times.size > 0 else 0.0
     frame_fps_mean = (1000.0 / frame_mean_ms) if frame_mean_ms > 0 else 0.0
+    window_center_delay_est_ms = ((n_frames - 1) / 2.0) * sample_mean_ms
     
     print(f'Protocol #1 Error (MPJPE): {error_sum_test.avg:.2f} mm')
     if call_times.size > 0:
@@ -309,6 +310,7 @@ def evaluate(model, test_loader, n_frames):
         f'p50={sample_fps_p50:.2f}, p95={sample_fps_p95:.2f}'
     )
     print(f'Inference FPS / frame: mean={frame_fps_mean:.2f}')
+    print(f'Estimated window-center delay (ms): {window_center_delay_est_ms:.3f}')
     print(f'PCK@10%_torso: {pck_metrics["PCK@10%_torso"] * 100:.2f}%')
     print(f'PCK@20%_torso: {pck_metrics["PCK@20%_torso"] * 100:.2f}%')
     print(f'PCK@30%_torso: {pck_metrics["PCK@30%_torso"] * 100:.2f}%')
